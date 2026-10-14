@@ -24,6 +24,7 @@ INTERNAL_API_SECRET = os.environ.get("INTERNAL_API_SECRET", "")
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 LOCAL_LLM_MODEL = os.environ.get("LOCAL_LLM_MODEL", "llama3.2:3b")
 GEMINI_MODEL = "gemini-3.5-flash"
+CURRENCY_SYMBOL = os.environ.get("CURRENCY_SYMBOL", "QAR")
 
 # Primary backend: Gemini (cloud). A short *connect* timeout with no retries means
 # that when the internet is down the request fails within ~3s and we fall straight
@@ -185,7 +186,7 @@ def _format_menu(items: list[dict]) -> str:
         flag_str = f" ({', '.join(flags)})" if flags else ""
         price = float(item["price"])
         desc = f" — {item['description']}" if item.get("description") else ""
-        lines.append(f"  - {item['name']}: Rs.{price:.0f}{flag_str}{desc}")
+        lines.append(f"  - {item['name']}: {CURRENCY_SYMBOL} {price:.0f}{flag_str}{desc}")
     return "\n".join(lines)
 
 

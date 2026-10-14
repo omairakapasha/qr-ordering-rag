@@ -1,0 +1,104 @@
+diff --git a/artifacts/api-server/src/pages/admin.ts b/artifacts/api-server/src/pages/admin.ts
+index 4513058..5114e97 100644
+--- a/artifacts/api-server/src/pages/admin.ts
++++ b/artifacts/api-server/src/pages/admin.ts
+@@ -847,7 +847,7 @@ export function adminPage(): string {
+       data: {
+         labels,
+         datasets: [
+-          { type: 'bar', label: 'Revenue (Rs.)', data: revenues, backgroundColor: 'rgba(200,82,26,0.75)', borderColor: '#C8521A', borderWidth: 1, borderRadius: 4, yAxisID: 'y' },
++          { type: 'bar', label: 'Revenue (${CURRENCY.code})', data: revenues, backgroundColor: 'rgba(200,82,26,0.75)', borderColor: '#C8521A', borderWidth: 1, borderRadius: 4, yAxisID: 'y' },
+           { type: 'line', label: 'Orders', data: orderCounts, borderColor: '#2563EB', backgroundColor: 'rgba(37,99,235,0.08)', tension: 0.35, pointRadius: 4, yAxisID: 'y1' }
+         ]
+       },
+@@ -856,7 +856,7 @@ export function adminPage(): string {
+         interaction: { mode: 'index', intersect: false },
+         plugins: { legend: { position: 'top' } },
+         scales: {
+-          y:  { position: 'left',  title: { display: true, text: 'Revenue (Rs.)' }, beginAtZero: true },
++          y:  { position: 'left',  title: { display: true, text: 'Revenue (${CURRENCY.code})' }, beginAtZero: true },
+           y1: { position: 'right', title: { display: true, text: 'Orders' }, beginAtZero: true, grid: { drawOnChartArea: false } }
+         }
+       }
+diff --git a/artifacts/api-server/src/pages/kitchen.ts b/artifacts/api-server/src/pages/kitchen.ts
+index b7ca201..c732b8d 100644
+--- a/artifacts/api-server/src/pages/kitchen.ts
++++ b/artifacts/api-server/src/pages/kitchen.ts
+@@ -1,4 +1,4 @@
+-import { BRAND, fontLinks, tokens, baseStyles, icon } from './theme';
++import { BRAND, CURRENCY, fontLinks, tokens, baseStyles, icon } from './theme';
+ 
+ export function kitchenPage(): string {
+   return /* html */`<!DOCTYPE html>
+@@ -262,7 +262,7 @@ export function kitchenPage(): string {
+           <div class="table-chip">Table \${order.tableNumber}</div>
+         </div>
+         <div class="order-items">\${itemRows}</div>
+-        <div class="order-total">Rs. \${parseFloat(order.totalAmount).toFixed(0)}</div>
++        <div class="order-total">${CURRENCY.symbol} \${parseFloat(order.totalAmount).toFixed(0)}</div>
+         <div class="action-btns">\${btn}\${cancelBtn}</div>
+       </div>\`;
+     }).join('');
+diff --git a/artifacts/api-server/src/routes/admin.ts b/artifacts/api-server/src/routes/admin.ts
+index c49642a..871405d 100644
+--- a/artifacts/api-server/src/routes/admin.ts
++++ b/artifacts/api-server/src/routes/admin.ts
+@@ -6,6 +6,7 @@ import { requireRole } from '../middlewares/requireRole.js';
+ import { asyncHandler, AppError } from '../middlewares/errorHandler.js';
+ import { writeAuditLog } from '../lib/auditLog.js';
+ import { buildCSV, csvResponse } from '../lib/csv.js';
++import config from '../config.js';
+ 
+ const router: Router = Router();
+ 
+@@ -216,7 +217,7 @@ router.get('/admin/export/orders', requireSession, requireRole('admin'), asyncHa
+     }
+   }
+ 
+-  const headers = ['Order ID', 'Table', 'Customer Name', 'Customer Phone', 'Status', 'Items', 'Total (Rs.)', 'Placed At'];
++  const headers = ['Order ID', 'Table', 'Customer Name', 'Customer Phone', 'Status', 'Items', `Total (${config.CURRENCY_CODE})`, 'Placed At'];
+   const rows = allOrders.map(o => [
+     o.id, o.tableNumber ?? '', o.customerName ?? '', o.customerPhone ?? '',
+     o.status, itemsByOrder[o.id] ?? '',
+@@ -242,7 +243,7 @@ router.get('/admin/export/audit-log', requireSession, requireRole('admin'), asyn
+ router.get('/admin/export/menu', requireSession, requireRole('admin'), asyncHandler(async (_req: Request, res: Response) => {
+   const items = await db.select().from(menu_items).orderBy(menu_items.category, menu_items.name);
+ 
+-  const headers = ['ID', 'Name', 'Category', 'Price (Rs.)', 'Description', 'Prep Time (min)', 'Vegetarian', 'Spice Level', 'Allergens', 'Popular', 'Available', 'Archived'];
++  const headers = ['ID', 'Name', 'Category', `Price (${config.CURRENCY_CODE})`, 'Description', 'Prep Time (min)', 'Vegetarian', 'Spice Level', 'Allergens', 'Popular', 'Available', 'Archived'];
+   const rows = items.map(i => [
+     i.id, i.name, i.category, parseFloat(i.price).toFixed(2), i.description ?? '', i.prep_time,
+     i.is_vegetarian ? 'Yes' : 'No', i.spice_level, (i.allergens ?? []).join('; '),
+diff --git a/docker-compose.yml b/docker-compose.yml
+index 82e1ebd..c189883 100644
+--- a/docker-compose.yml
++++ b/docker-compose.yml
+@@ -62,6 +62,7 @@ services:
+       DATABASE_URL: postgresql://postgres:postgres@db:5432/restaurant
+       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+       INTERNAL_API_SECRET: ${INTERNAL_API_SECRET:-}
++      CURRENCY_SYMBOL: ${CURRENCY_SYMBOL:-QAR}
+     depends_on:
+       db:
+         condition: service_healthy
+diff --git a/packages/ai-chat/main.py b/packages/ai-chat/main.py
+index f00ab29..0b125cd 100644
+--- a/packages/ai-chat/main.py
++++ b/packages/ai-chat/main.py
+@@ -24,6 +24,7 @@ INTERNAL_API_SECRET = os.environ.get("INTERNAL_API_SECRET", "")
+ OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+ LOCAL_LLM_MODEL = os.environ.get("LOCAL_LLM_MODEL", "llama3.2:3b")
+ GEMINI_MODEL = "gemini-3.5-flash"
++CURRENCY_SYMBOL = os.environ.get("CURRENCY_SYMBOL", "QAR")
+ 
+ # Primary backend: Gemini (cloud). A short *connect* timeout with no retries means
+ # that when the internet is down the request fails within ~3s and we fall straight
+@@ -185,7 +186,7 @@ def _format_menu(items: list[dict]) -> str:
+         flag_str = f" ({', '.join(flags)})" if flags else ""
+         price = float(item["price"])
+         desc = f" — {item['description']}" if item.get("description") else ""
+-        lines.append(f"  - {item['name']}: Rs.{price:.0f}{flag_str}{desc}")
++        lines.append(f"  - {item['name']}: {CURRENCY_SYMBOL} {price:.0f}{flag_str}{desc}")
+     return "\n".join(lines)
+ 
+ 

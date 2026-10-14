@@ -62,6 +62,7 @@ services:
       DATABASE_URL: postgresql://postgres:postgres@db:5432/restaurant
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       INTERNAL_API_SECRET: ${INTERNAL_API_SECRET:-}
+      CURRENCY_SYMBOL: ${CURRENCY_SYMBOL:-QAR}
     depends_on:
       db:
         condition: service_healthy

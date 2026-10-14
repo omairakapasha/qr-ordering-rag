@@ -6,6 +6,7 @@ import { requireRole } from '../middlewares/requireRole.js';
 import { asyncHandler, AppError } from '../middlewares/errorHandler.js';
 import { writeAuditLog } from '../lib/auditLog.js';
 import { buildCSV, csvResponse } from '../lib/csv.js';
+import config from '../config.js';
 
 const router: Router = Router();
 
@@ -216,7 +217,7 @@ router.get('/admin/export/orders', requireSession, requireRole('admin'), asyncHa
     }
   }
 
-  const headers = ['Order ID', 'Table', 'Customer Name', 'Customer Phone', 'Status', 'Items', 'Total (Rs.)', 'Placed At'];
+  const headers = ['Order ID', 'Table', 'Customer Name', 'Customer Phone', 'Status', 'Items', `Total (${config.CURRENCY_CODE})`, 'Placed At'];
   const rows = allOrders.map(o => [
     o.id, o.tableNumber ?? '', o.customerName ?? '', o.customerPhone ?? '',
     o.status, itemsByOrder[o.id] ?? '',
@@ -242,7 +243,7 @@ router.get('/admin/export/audit-log', requireSession, requireRole('admin'), asyn
 router.get('/admin/export/menu', requireSession, requireRole('admin'), asyncHandler(async (_req: Request, res: Response) => {
   const items = await db.select().from(menu_items).orderBy(menu_items.category, menu_items.name);
 
-  const headers = ['ID', 'Name', 'Category', 'Price (Rs.)', 'Description', 'Prep Time (min)', 'Vegetarian', 'Spice Level', 'Allergens', 'Popular', 'Available', 'Archived'];
+  const headers = ['ID', 'Name', 'Category', `Price (${config.CURRENCY_CODE})`, 'Description', 'Prep Time (min)', 'Vegetarian', 'Spice Level', 'Allergens', 'Popular', 'Available', 'Archived'];
   const rows = items.map(i => [
     i.id, i.name, i.category, parseFloat(i.price).toFixed(2), i.description ?? '', i.prep_time,
     i.is_vegetarian ? 'Yes' : 'No', i.spice_level, (i.allergens ?? []).join('; '),

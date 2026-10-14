@@ -1,4 +1,4 @@
-import { BRAND, fontLinks, tokens, baseStyles, icon } from './theme';
+import { BRAND, CURRENCY, fontLinks, tokens, baseStyles, icon } from './theme';
 
 export function kitchenPage(): string {
   return /* html */`<!DOCTYPE html>
@@ -262,7 +262,7 @@ export function kitchenPage(): string {
           <div class="table-chip">Table \${order.tableNumber}</div>
         </div>
         <div class="order-items">\${itemRows}</div>
-        <div class="order-total">Rs. \${parseFloat(order.totalAmount).toFixed(0)}</div>
+        <div class="order-total">${CURRENCY.symbol} \${parseFloat(order.totalAmount).toFixed(0)}</div>
         <div class="action-btns">\${btn}\${cancelBtn}</div>
       </div>\`;
     }).join('');

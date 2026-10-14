@@ -847,7 +847,7 @@ export function adminPage(): string {
       data: {
         labels,
         datasets: [
-          { type: 'bar', label: 'Revenue (Rs.)', data: revenues, backgroundColor: 'rgba(200,82,26,0.75)', borderColor: '#C8521A', borderWidth: 1, borderRadius: 4, yAxisID: 'y' },
+          { type: 'bar', label: 'Revenue (${CURRENCY.code})', data: revenues, backgroundColor: 'rgba(200,82,26,0.75)', borderColor: '#C8521A', borderWidth: 1, borderRadius: 4, yAxisID: 'y' },
           { type: 'line', label: 'Orders', data: orderCounts, borderColor: '#2563EB', backgroundColor: 'rgba(37,99,235,0.08)', tension: 0.35, pointRadius: 4, yAxisID: 'y1' }
         ]
       },
@@ -856,7 +856,7 @@ export function adminPage(): string {
         interaction: { mode: 'index', intersect: false },
         plugins: { legend: { position: 'top' } },
         scales: {
-          y:  { position: 'left',  title: { display: true, text: 'Revenue (Rs.)' }, beginAtZero: true },
+          y:  { position: 'left',  title: { display: true, text: 'Revenue (${CURRENCY.code})' }, beginAtZero: true },
           y1: { position: 'right', title: { display: true, text: 'Orders' }, beginAtZero: true, grid: { drawOnChartArea: false } }
         }
       }
