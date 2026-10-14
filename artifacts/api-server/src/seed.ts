@@ -2,6 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { db, staff, tables, menu_items } from '@workspace/db';
 import { count } from 'drizzle-orm';
 import { logger } from './lib/logger.js';
+import { hashPassword } from './lib/password.js';
 
 export async function seedIfEmpty() {
   const [staffCount] = await db.select({ c: count(staff.id) }).from(staff);
@@ -20,9 +21,9 @@ export async function seedIfEmpty() {
   const waiterPassword = process.env.DEFAULT_WAITER_PASSWORD ?? 'waiter123';
 
   await db.insert(staff).values([
-    { username: adminUsername,   password_hash: adminPassword,   full_name: 'System Administrator', role: 'admin' },
-    { username: kitchenUsername, password_hash: kitchenPassword, full_name: 'Kitchen Staff',        role: 'kitchen' },
-    { username: waiterUsername,  password_hash: waiterPassword,  full_name: 'Floor Waiter',         role: 'waiter' },
+    { username: adminUsername,   password_hash: await hashPassword(adminPassword),   full_name: 'System Administrator', role: 'admin' },
+    { username: kitchenUsername, password_hash: await hashPassword(kitchenPassword), full_name: 'Kitchen Staff',        role: 'kitchen' },
+    { username: waiterUsername,  password_hash: await hashPassword(waiterPassword),  full_name: 'Floor Waiter',         role: 'waiter' },
   ]);
 
   // Create 20 tables with unique QR tokens

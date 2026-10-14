@@ -8,6 +8,7 @@ import { logger } from '../lib/logger.js';
 import { requireSession, invalidateSession } from '../middlewares/requireSession.js';
 import { asyncHandler, AppError } from '../middlewares/errorHandler.js';
 import config from '../config.js';
+import { verifyPassword, hashPassword, DUMMY_HASH } from '../lib/password.js';
 
 const router: Router = Router();
 
@@ -39,11 +40,18 @@ router.post(
       .where(eq(staff.username, username))
       .limit(1);
 
-    const passwordMatch = password === user?.password_hash;
+    const { ok: passwordMatch, needsRehash } = await verifyPassword(
+      password,
+      user?.password_hash ?? DUMMY_HASH,
+    );
 
     if (!user || !user.active || !passwordMatch) {
       logger.warn(`Login failed: ${username} from ${clientIp}`);
       throw new AppError(401, 'Invalid username or password');
+    }
+
+    if (needsRehash) {
+      await db.update(staff).set({ password_hash: await hashPassword(password) }).where(eq(staff.id, user.id));
     }
 
     const token = randomBytes(32).toString('hex');

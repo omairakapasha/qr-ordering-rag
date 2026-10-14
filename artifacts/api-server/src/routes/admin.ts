@@ -7,6 +7,7 @@ import { asyncHandler, AppError } from '../middlewares/errorHandler.js';
 import { writeAuditLog } from '../lib/auditLog.js';
 import { buildCSV, csvResponse } from '../lib/csv.js';
 import config from '../config.js';
+import { hashPassword } from '../lib/password.js';
 
 const router: Router = Router();
 
@@ -43,7 +44,7 @@ router.post('/staff', requireSession, requireRole('admin'), asyncHandler(async (
 
   const [member] = await db
     .insert(staff)
-    .values({ username, password_hash: password, full_name: fullName, role: role as 'admin' | 'kitchen' | 'waiter' })
+    .values({ username, password_hash: await hashPassword(password), full_name: fullName, role: role as 'admin' | 'kitchen' | 'waiter' })
     .returning({ id: staff.id, username: staff.username, fullName: staff.full_name, role: staff.role, active: staff.active });
 
   if (!member) throw new Error('Staff insert returned no result');
@@ -66,7 +67,7 @@ router.patch('/staff/:id', requireSession, requireRole('admin'), asyncHandler(as
   if (active !== undefined) updates.active = active;
   if (newPassword) {
     if (newPassword.length < 8) throw new AppError(400, 'Password must be at least 8 characters');
-    updates.password_hash = newPassword;
+    updates.password_hash = await hashPassword(newPassword);
     await db.delete(sessions).where(eq(sessions.staff_id, id));
   }
 

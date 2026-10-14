@@ -181,6 +181,7 @@ cd packages/ai-chat && uvicorn main:app --port 8001
 - Deleting a table depends on its history. A table with no orders is removed from the database. One with orders is only deactivated, so the financial records stay intact.
 - The kitchen WebSocket feed is authenticated during the HTTP upgrade, and unauthenticated upgrades are dropped.
 - History is never rewritten. Menu items are soft-archived, order-line prices are copied at order time, and the audit log is never updated or deleted.
+- Passwords are hashed with bcrypt. Accounts created before hashing was added are upgraded the first time their owner logs in, and a login attempt for an unknown username takes about as long as one for a real account.
 - Sessions are stored in Postgres. A password reset or account deactivation cuts off access immediately, and restarting the server doesn't log anyone out.
 
 ## Working without internet
