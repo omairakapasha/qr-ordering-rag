@@ -5,7 +5,7 @@
 [![PostgreSQL](https://img.shields.io/badge/postgres-15-4169E1.svg)](https://www.postgresql.org/)
 [![Docker](https://img.shields.io/badge/docker-ready-2496ED.svg)](https://www.docker.com/)
 
-A self-hosted ordering system for dine-in restaurants. A diner scans the QR code on their table, browses the menu, adds items to a cart and places the order. There is no app to install and no account to make. About a second later the order shows up on the kitchen screen over WebSocket. Diners can also ask a chat assistant about the menu, which answers using retrieval over the restaurant's own menu data and runs on either Gemini or a local model. Staff run everything else (menu, tables, orders, inventory, people) from one admin dashboard.
+A self-hosted ordering system for dine-in restaurants. A diner scans the QR code on their table, browses the menu, adds items to a cart and places the order. There is no app to install and no account to make. About a second later the order shows up on the kitchen screen over WebSocket. Diners can also ask a chat assistant about the menu, which answers from the live menu and runs on Gemini or, when the internet is down, a local model. Staff run everything else (menu, tables, orders, inventory, people) from one admin dashboard.
 
 It runs on a single server with your own database and charges nothing per order. Payment is cash only.
 
@@ -24,7 +24,9 @@ It runs on a single server with your own database and charges nothing per order.
 - [Configuration](#configuration)
 - [Local development](#local-development)
 - [Design notes](#design-notes)
+- [Working without internet](#working-without-internet)
 - [Screenshots](#screenshots)
+- [License](#license)
 
 ## Quickstart
 
@@ -119,9 +121,21 @@ flowchart LR
 
 ## AI menu assistant
 
-The assistant is a retrieval-augmented chatbot that answers diners' questions about the menu. It is a separate FastAPI service in `packages/ai-chat`, and the Express API proxies chat requests to it, authenticating with `INTERNAL_API_SECRET`. The service keeps conversation state for each chat session.
+The assistant answers diners' questions about the menu. It is a separate FastAPI service in `packages/ai-chat`, built on the OpenAI Agents SDK. The Express API proxies chat requests to it and authenticates with `INTERNAL_API_SECRET`.
 
-Model routing is set by configuration. With `GEMINI_API_KEY` set, replies come from Gemini. Without it, the service uses a local model through Ollama, so the whole system can run without any external API. The assistant answers questions only. It doesn't add items to the cart or place orders. Chat requests are rate limited per chat session.
+### How retrieval works
+
+On each request the service reads the available, non-archived menu items from PostgreSQL (name, description, price, category, vegetarian flag, spice level, allergens, popular flag), formats them as text and puts them in the system prompt. The result is cached for 60 seconds, so a price or availability change reaches the assistant within a minute. A menu is small enough to fit in the prompt, so there is no embedding step or vector store. The prompt tells the model to answer only from that menu and to suggest an alternative when an item isn't on it.
+
+### Model routing and fallback
+
+With `GEMINI_API_KEY` set, requests go to Gemini first. The Gemini client has a 3-second connect timeout and no retries, so when the internet is down the request fails fast and the service moves on to a local model served by Ollama (`llama3.2:3b` by default, set with `LOCAL_LLM_MODEL`). Connection errors, quota errors (429) and upstream 5xx responses all trigger the same fallback. Without a Gemini key, every request goes to the local model. If neither backend is reachable, the endpoint returns a 503. Each response reports which backend answered, and `/health` shows the state of the database, Gemini and the local model.
+
+### Conversation state and limits
+
+The service keeps the last 5 exchanges for each chat session in memory, drops sessions idle for an hour, and holds at most 500 sessions. A restart clears them. The Express API rate limits chat requests per chat session.
+
+The assistant has no tools. It answers questions and doesn't add items to the cart or place orders.
 
 ## Configuration
 
@@ -169,6 +183,18 @@ cd packages/ai-chat && uvicorn main:app --port 8001
 - History is never rewritten. Menu items are soft-archived, order-line prices are copied at order time, and the audit log is never updated or deleted.
 - Sessions are stored in Postgres. A password reset or account deactivation cuts off access immediately, and restarting the server doesn't log anyone out.
 
+## Working without internet
+
+The core flow runs on the restaurant's local network. Diners reach the server over WiFi, QR codes are generated on the server, and the order, kitchen and waiter screens talk to the server and PostgreSQL only. The AI assistant falls back to a local Ollama model when Gemini is unreachable.
+
+A few things still need a connection:
+
+- Push notifications for ready orders.
+- Gemini replies. The local model covers the assistant when they are unavailable.
+- Chart.js on the admin dashboard, which loads from a CDN, so the analytics charts need internet unless the browser has it cached.
+- Google Fonts on every page. Without them the pages fall back to system fonts.
+- The first `docker compose up`, which pulls images and builds the services.
+
 ## Screenshots
 
 <details>
@@ -186,3 +212,7 @@ cd packages/ai-chat && uvicorn main:app --port 8001
 </p>
 
 </details>
+
+## License
+
+Released under the [GNU Affero General Public License v3.0](LICENSE).
