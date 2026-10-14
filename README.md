@@ -25,6 +25,7 @@ It runs on a single server with your own database and charges nothing per order.
 - [Local development](#local-development)
 - [Design notes](#design-notes)
 - [Working without internet](#working-without-internet)
+- [Customer data](#customer-data)
 - [Screenshots](#screenshots)
 - [License](#license)
 
@@ -155,6 +156,8 @@ Put environment variables in `.env` for Docker, or in `artifacts/api-server/.env
 | `OLLAMA_BASE_URL` | No | Local fallback model server. Defaults to `localhost:11434`. |
 | `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` | No | Turn on order-ready push notifications |
 | `INTERNAL_API_SECRET` | No | Shared secret for the Express to AI service proxy |
+| `PII_RETENTION_DAYS` | No | Days to keep the customer's name and phone number on each order. Defaults to `90`. Use `0` to keep them forever. |
+| `AI_CHAT_IP_LIMIT_PER_MIN` | No | Chat messages per minute allowed from one network address, on top of the per-conversation limit. Defaults to `120`. |
 | `TRUST_PROXY` | No | Number of reverse proxies in front of the app, for example `1` on most hosting platforms. Leave empty when phones connect directly. |
 
 ## Local development
@@ -180,7 +183,7 @@ Run the tests with `pnpm --filter @workspace/api-server run test`. They mock the
 ## Design notes
 
 - Stock can't be oversold. When an item has finite stock, the order transaction decrements it under a `WHERE stock_quantity >= requested` guard, so two concurrent orders for the last portion can't both succeed.
-- Rate limits are keyed on the table's QR token, the order ID or the chat session rather than the IP address, because every diner in the restaurant shares the same WiFi egress.
+- Rate limits are keyed on the table's QR token, the order ID or the chat session rather than the IP address, because every diner in the restaurant shares the same WiFi egress. The client chooses its own chat session id, so the assistant also has a generous per-IP limit (120 messages a minute by default) to stop a script from dodging the per-session one.
 - Deleting a table depends on its history. A table with no orders is removed from the database. One with orders is only deactivated, so the financial records stay intact.
 - The kitchen WebSocket feed is authenticated during the HTTP upgrade, and unauthenticated upgrades are dropped.
 - History is never rewritten. Menu items are soft-archived, order-line prices are copied at order time, and the audit log is never updated or deleted.
@@ -201,6 +204,14 @@ A few things still need a connection:
 - Chart.js on the admin dashboard, which loads from a CDN, so the analytics charts need internet unless the browser has it cached.
 - Google Fonts on every page. Without them the pages fall back to system fonts.
 - The first `docker compose up`, which pulls images and builds the services.
+
+## Customer data
+
+When a diner places an order, the app stores the name and phone number they entered on that order, in the `customer_name` and `customer_phone` columns of the `orders` table in your PostgreSQL database. The phone number is saved with spaces and dashes removed. The application doesn't encrypt either field, so protect the database volume and its backups as you would any customer data.
+
+Kitchen and waiter screens show them on the order ticket, and admins can see them and export them in the orders CSV. The diner's browser keeps only their cart. The app doesn't write names or phone numbers to its logs, but a reverse proxy in front of it may log request URLs, and the order lookup puts the phone number in the URL.
+
+By default the name and phone number are cleared from orders older than 90 days, when the server starts and once a day after that. The orders, items and totals stay, so sales figures don't change. Set `PII_RETENTION_DAYS` to change the period, or to `0` to keep the details for good. The cleanup doesn't reach database backups taken before it ran.
 
 ## Screenshots
 

@@ -15,6 +15,11 @@ for (const envVar of requiredEnvVars) {
   }
 }
 
+function nonNegativeInt(value: string | undefined, fallback: number): number {
+  const n = Number(value);
+  return value !== undefined && value !== '' && Number.isInteger(n) && n >= 0 ? n : fallback;
+}
+
 export default {
   // Branding — configurable so any restaurant can rebrand without code changes.
   // Consumed by pages/theme.ts (BRAND) and surfaced on the customer header,
@@ -33,6 +38,10 @@ export default {
   // Number of reverse proxies in front of the app (e.g. 1 on most hosting platforms).
   // Leave empty when the app is reached directly.
   TRUST_PROXY: process.env.TRUST_PROXY || '',
+  // Days to keep customer names and phone numbers on orders. 0 keeps them forever.
+  PII_RETENTION_DAYS: nonNegativeInt(process.env.PII_RETENTION_DAYS, 90),
+  // Chat messages allowed per minute from one IP address, on top of the per-session limit.
+  AI_CHAT_IP_LIMIT_PER_MIN: nonNegativeInt(process.env.AI_CHAT_IP_LIMIT_PER_MIN, 120) || 120,
 
   // Database
   DATABASE_URL: process.env.DATABASE_URL!,

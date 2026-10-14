@@ -17,6 +17,7 @@ import { seedIfEmpty } from './seed';
 import compression from 'compression';
 import webpush from 'web-push';
 import { runMigrations } from './lib/migrate.js';
+import { anonymizeOldOrders } from './lib/retention.js';
 import authRoutes from './routes/auth';
 import menuRoutes from './routes/menu';
 import ordersRoutes from './routes/orders';
@@ -211,6 +212,16 @@ async function start() {
   // Prune expired sessions on startup and every hour thereafter
   await pruneExpiredSessions();
   setInterval(pruneExpiredSessions, 60 * 60 * 1000);
+
+  // Clear customer names and phone numbers from old orders, at startup and once a day.
+  if (config.PII_RETENTION_DAYS > 0) {
+    const clearOldCustomerDetails = () =>
+      anonymizeOldOrders(config.PII_RETENTION_DAYS).catch((err) => {
+        logger.error('Customer data retention job failed', { err });
+      });
+    await clearOldCustomerDetails();
+    setInterval(clearOldCustomerDetails, 24 * 60 * 60 * 1000);
+  }
 
   httpServer.on('error', (err: NodeJS.ErrnoException) => {
     if (err.code === 'EADDRINUSE') {

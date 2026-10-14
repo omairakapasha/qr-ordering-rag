@@ -21,8 +21,20 @@ const aiChatLimiter = rateLimit({
   message: { error: 'Too many chat messages. Please wait a moment.' },
 });
 
+// Backstop for the per-session limit above. The session id comes from the client, so a
+// script can rotate it to dodge that limit. This one follows the IP address instead. The
+// default is generous because everyone on the restaurant's WiFi shares one address.
+const aiChatIpLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: config.AI_CHAT_IP_LIMIT_PER_MIN,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many chat messages from this network. Please wait a moment.' },
+});
+
 router.post(
   '/ai/menu-chat',
+  aiChatIpLimiter,
   aiChatLimiter,
   asyncHandler(async (req: Request, res: ExpressResponse) => {
     const { message, sessionId } = req.body;
