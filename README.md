@@ -1,4 +1,4 @@
-# Restaurant Ordering System
+# QR Ordering System with an AI Menu Assistant
 
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178C6.svg)](https://www.typescriptlang.org/)
 [![Node](https://img.shields.io/badge/node-%E2%89%A524-339933.svg)](https://nodejs.org/)
