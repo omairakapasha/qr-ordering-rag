@@ -12,7 +12,7 @@ It runs on a single server with your own database and charges nothing per order.
 ## Demo
 
 <p align="center">
-  <video src="./assets/Self%20Hosted%20Ordering%20System.mp4" width="100%" controls autoplay loop></video>
+  <video src="https://lnkd.in/p/dbq3uRXT" width="100%" controls autoplay loop></video>
 </p>
 
 ## Contents
