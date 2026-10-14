@@ -1,5 +1,11 @@
 /**
- * Test suite for the table-token-auth security fix (PLAN.md #0).
+ * Route tests for /api/orders. The database is mocked (see makeChain below), so
+ * these check the handler logic and the queries it builds, not Postgres itself.
+ *
+ * Suites: table-token auth, input validation, the stock guard, customer cancel
+ * (including the concurrent-cancel race) and the phone/QR-token order lookup.
+ *
+ * The first suite covers the table-token-auth security fix (PLAN.md #0).
  *
  * Exercises the auth/authz logic on POST /api/orders:
  *   - Unauthenticated callers MUST supply a valid QR `tableToken`.
@@ -251,5 +257,185 @@ describe('buildValidOrderBody helper', () => {
     expect(body.customerName).toBe('Jane');
     expect((body as any).tableToken).toBe('t-1');
     expect(body.items[0]).toMatchObject({ menuItemId: 1, quantity: 2 });
+  });
+});
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers shared by the suites below
+// ─────────────────────────────────────────────────────────────────────────────
+
+// The order and lookup limiters key on the table token, so every test uses its
+// own token to stay clear of the per-minute limits.
+let tokenCounter = 0;
+const freshToken = () => `test-token-${++tokenCounter}`;
+const uuid = () => crypto.randomUUID();
+
+function tokenOrder(overrides: Record<string, any> = {}) {
+  return buildValidOrderBody({ tableToken: freshToken(), tableNumber: undefined, ...overrides });
+}
+
+describe('POST /api/orders — customer details validation', () => {
+  let app: express.Express;
+  beforeEach(() => {
+    resultQueue.length = 0;
+    whereCalls.length = 0;
+    vi.clearAllMocks();
+    app = makeApp();
+  });
+
+  it.each([
+    ['Qatar, local', '5512 3456'],
+    ['Qatar, international', '+974 5512 3456'],
+    ['UAE, local', '050 123 4567'],
+    ['Saudi Arabia, local', '0501234567'],
+    ['Pakistan, local', '0300-1234567'],
+  ])('accepts a %s number (%s)', async (_label, phone) => {
+    queueHappyPathTail();
+    const res = await request(app).post('/api/orders').send(tokenOrder({ customerPhone: phone }));
+    expect(res.status).toBe(201);
+  });
+
+  it.each(['Ali', 'Omar', 'Al'])('accepts the short name "%s"', async (name) => {
+    queueHappyPathTail();
+    const res = await request(app).post('/api/orders').send(tokenOrder({ customerName: name }));
+    expect(res.status).toBe(201);
+  });
+
+  it.each(['abc', '123', '+', '1234567890123456', '55 12 34 5x'])('rejects the phone "%s"', async (phone) => {
+    const res = await request(app).post('/api/orders').send(tokenOrder({ customerPhone: phone }));
+    expect(res.status).toBe(422);
+    expect(res.body.details[0].field).toBe('customerPhone');
+    expect(res.body.details[0].message).toMatch(/phone/i);
+  });
+
+  it.each(['', ' ', 'A'])('rejects the name "%s"', async (name) => {
+    const res = await request(app).post('/api/orders').send(tokenOrder({ customerName: name }));
+    expect(res.status).toBe(422);
+    expect(res.body.details[0].field).toBe('customerName');
+  });
+});
+
+describe('POST /api/orders — stock guard', () => {
+  let app: express.Express;
+  const LIMITED_ROW = { ...MENU_ROW, stock_quantity: 5 };
+
+  beforeEach(() => {
+    resultQueue.length = 0;
+    whereCalls.length = 0;
+    vi.clearAllMocks();
+    app = makeApp();
+  });
+
+  it('rejects an order for more than the remaining stock before touching the database', async () => {
+    resultQueue.push([TABLE_ROW]);
+    resultQueue.push([{ ...LIMITED_ROW, stock_quantity: 1 }]);
+    const res = await request(app).post('/api/orders').send(tokenOrder()); // wants 2, only 1 left
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/insufficient stock/i);
+  });
+
+  it('fails the order when the guarded stock update matches no row (another order took the last items)', async () => {
+    resultQueue.push([TABLE_ROW]);
+    resultQueue.push([LIMITED_ROW]);                 // pre-check passes
+    resultQueue.push({}, {}, { rowCount: 0 });       // insert order, insert items, guarded UPDATE finds nothing
+    const res = await request(app).post('/api/orders').send(tokenOrder());
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/ran out of stock/i);
+  });
+
+  it('places the order when the guarded stock update succeeds', async () => {
+    resultQueue.push([TABLE_ROW]);
+    resultQueue.push([LIMITED_ROW]);
+    resultQueue.push({}, {}, { rowCount: 1 }, {});   // ..., guarded UPDATE succeeds, mark table occupied
+    const res = await request(app).post('/api/orders').send(tokenOrder());
+    expect(res.status).toBe(201);
+  });
+});
+
+describe('POST /api/orders/:id/cancel', () => {
+  let app: express.Express;
+  const orderRow = (overrides: Record<string, any> = {}) => ({
+    id: 'x', status: 'received', created_at: new Date(), table_id: 1, customer_name: 'Ali', ...overrides,
+  });
+
+  beforeEach(() => {
+    resultQueue.length = 0;
+    whereCalls.length = 0;
+    vi.clearAllMocks();
+    app = makeApp();
+  });
+
+  it('cancels a fresh order and restores its stock', async () => {
+    resultQueue.push([orderRow()]);                      // order lookup
+    resultQueue.push([{ menuItemId: 1, quantity: 2 }]);  // items to restore
+    resultQueue.push([{ id: 'x' }], {}, {});             // UPDATE ... RETURNING, history insert, stock restore
+    resultQueue.push([], {});                            // other active orders at the table, table -> available
+    const res = await request(app).post(`/api/orders/${uuid()}/cancel`);
+    expect(res.status).toBe(200);
+    expect(res.body.message).toBe('Order cancelled');
+  });
+
+  it('refuses a second, concurrent cancel and does not restore stock again', async () => {
+    resultQueue.push([orderRow()]);                      // both requests saw status = received
+    resultQueue.push([{ menuItemId: 1, quantity: 2 }]);
+    resultQueue.push([]);                                // the guarded UPDATE matches no row: someone else got there first
+    // Sentinels for the history insert and stock restore. If the handler carried on
+    // past the failed UPDATE it would consume them.
+    resultQueue.push({ sentinel: 1 }, { sentinel: 2 });
+    const res = await request(app).post(`/api/orders/${uuid()}/cancel`);
+    expect(res.status).toBe(409);
+    expect(resultQueue).toHaveLength(2);
+  });
+
+  it('refuses to cancel once the kitchen has started the order', async () => {
+    resultQueue.push([orderRow({ status: 'preparing' })]);
+    const res = await request(app).post(`/api/orders/${uuid()}/cancel`);
+    expect(res.status).toBe(409);
+  });
+
+  it('refuses to cancel after the 2-minute window', async () => {
+    resultQueue.push([orderRow({ created_at: new Date(Date.now() - 3 * 60 * 1000) })]);
+    const res = await request(app).post(`/api/orders/${uuid()}/cancel`);
+    expect(res.status).toBe(409);
+  });
+});
+
+describe('GET /api/orders/lookup', () => {
+  let app: express.Express;
+  beforeEach(() => {
+    resultQueue.length = 0;
+    whereCalls.length = 0;
+    vi.clearAllMocks();
+    app = makeApp();
+  });
+
+  it('requires a table token', async () => {
+    const res = await request(app).get('/api/orders/lookup').query({ phone: '+974 5512 3456' });
+    expect(res.status).toBe(401);
+  });
+
+  it('rejects an unknown table token', async () => {
+    resultQueue.push([]); // no such table
+    const res = await request(app).get('/api/orders/lookup').query({ phone: '55123456', tableToken: freshToken() });
+    expect(res.status).toBe(401);
+  });
+
+  it('rejects an invalid phone number', async () => {
+    const res = await request(app).get('/api/orders/lookup').query({ phone: 'abc', tableToken: freshToken() });
+    expect(res.status).toBe(400);
+  });
+
+  it('only searches this table, for the normalized phone number', async () => {
+    resultQueue.push([{ id: 7 }]);                                            // table lookup
+    resultQueue.push([{ id: 'o1', status: 'received', totalAmount: '38' }]);  // matching orders
+    const res = await request(app).get('/api/orders/lookup').query({ phone: '+974 5512-3456', tableToken: freshToken() });
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(1);
+
+    const lookup = whereCalls.map(w => JSON.stringify(w)).find(w => w.includes('orders.customer_phone'))!;
+    expect(lookup).toContain('"val":"+97455123456"');                  // spaces and dashes stripped
+    expect(lookup).toContain('"col":"orders.table_id","val":7');       // scoped to the token's table
+    expect(lookup).toContain('"op":"gte"');                            // limited to recent orders
   });
 });

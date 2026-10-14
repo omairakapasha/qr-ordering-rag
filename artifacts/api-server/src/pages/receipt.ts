@@ -100,8 +100,8 @@ export function receiptPage(orderId: string): string {
         const order = await r.json();
 
         const date = new Date(order.createdAt);
-        const dateStr = date.toLocaleDateString('en-PK', { day:'2-digit', month:'short', year:'numeric' });
-        const timeStr = date.toLocaleTimeString('en-PK', { hour:'2-digit', minute:'2-digit' });
+        const dateStr = date.toLocaleDateString(undefined, { day:'2-digit', month:'short', year:'numeric' });
+        const timeStr = date.toLocaleTimeString(undefined, { hour:'2-digit', minute:'2-digit' });
 
         let itemRows = '';
         let subtotal = 0;

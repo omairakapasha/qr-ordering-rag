@@ -10,6 +10,7 @@ import { asyncHandler, AppError } from '../middlewares/errorHandler';
 import { broadcast } from '../lib/websocket';
 import { sendOrderReadyNotification } from '../lib/push.js';
 import { writeAuditLog } from '../lib/auditLog.js';
+import { phoneSchema, normalizePhone, isValidPhone } from '../lib/phone.js';
 import { v4 as uuidv4 } from 'uuid';
 
 // Keyed by table token so each table gets its own independent limit.
@@ -52,6 +53,21 @@ const statusPollLimiter = rateLimit({
   legacyHeaders: false,
   message: { error: 'Too many status requests.' },
 });
+
+// Order lookup is keyed by the table's QR token: a lookup needs a real token, so
+// the limit follows the table and not the restaurant's shared WiFi address.
+const lookupLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 20,
+  keyGenerator: (req) => `lookup:${String(req.query.tableToken ?? req.ip ?? 'unknown')}`,
+  validate: { keyGeneratorIpFallback: false },
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many lookups. Please wait a minute.' },
+});
+
+// Lookups only cover orders from the last few hours, which is a dine-in visit.
+const LOOKUP_WINDOW_MS = 6 * 60 * 60 * 1000;
 
 const router: Router = Router();
 
@@ -127,8 +143,8 @@ async function tableHasOtherActiveOrders(tableId: number, excludeOrderId: string
 const createOrderSchema = z.object({
   tableToken: z.string().min(1).optional(),
   tableNumber: z.number().int().positive().optional(),
-  customerName: z.string().min(5, 'Name required').max(20),
-  customerPhone: z.string().min(11, 'Phone required').max(11),
+  customerName: z.string().trim().min(2, 'Please enter your name').max(50, 'Name is too long'),
+  customerPhone: phoneSchema,
   items: z.array(
     z.object({
       menuItemId: z.number().int().positive(),
@@ -184,16 +200,27 @@ async function getActiveQueueWithItems() {
 }
 
 /**
- * GET /api/orders/lookup?phone=  — find recent orders by customer phone (public)
- * Must be defined before /:id to avoid route collision.
+ * GET /api/orders/lookup?phone=&tableToken=  — find this visit's orders by phone number.
+ * Needs the table's QR token as well as the phone number, so knowing a phone
+ * number alone doesn't reveal anyone's orders. Must be defined before /:id.
  */
 router.get(
   '/lookup',
-  statusPollLimiter,
+  lookupLimiter,
   asyncHandler(async (req: Request, res: Response) => {
-    const phone = String(req.query.phone ?? '').trim();
-    if (!phone || phone.length < 7) throw new AppError(400, 'Valid phone number required');
+    const tableToken = String(req.query.tableToken ?? '');
+    const phone = normalizePhone(String(req.query.phone ?? ''));
+    if (!tableToken) throw new AppError(401, 'Table token required');
+    if (!isValidPhone(phone)) throw new AppError(400, 'Valid phone number required');
 
+    const [table] = await db
+      .select({ id: tables.id })
+      .from(tables)
+      .where(and(eq(tables.qr_token, tableToken), eq(tables.active, true)))
+      .limit(1);
+    if (!table) throw new AppError(401, 'Invalid table');
+
+    const since = new Date(Date.now() - LOOKUP_WINDOW_MS);
     const recent = await db
       .select({
         id: orders.id,
@@ -204,7 +231,11 @@ router.get(
       })
       .from(orders)
       .leftJoin(tables, eq(orders.table_id, tables.id))
-      .where(eq(orders.customer_phone, phone))
+      .where(and(
+        eq(orders.customer_phone, phone),
+        eq(orders.table_id, table.id),
+        gte(orders.created_at, since),
+      ))
       .orderBy(desc(orders.created_at))
       .limit(10);
 
@@ -480,12 +511,20 @@ router.post(
       .where(eq(order_items.order_id, id));
 
     await db.transaction(async (tx) => {
-      await tx.update(orders).set({
+      // The status check above ran outside this transaction, so repeat it in the
+      // UPDATE itself. Only the request that actually moves the order out of
+      // 'received' may restore stock; a concurrent cancel (or the kitchen starting
+      // the order) matches no row and is rejected, so stock can't be restored twice.
+      const cancelled = await tx.update(orders).set({
         status: 'cancelled',
         updated_at: new Date(),
         cancelled_at: new Date(),
         cancellation_reason: 'Customer cancelled',
-      }).where(eq(orders.id, id));
+      }).where(and(eq(orders.id, id), eq(orders.status, 'received')))
+        .returning({ id: orders.id });
+      if (cancelled.length === 0) {
+        throw new AppError(409, 'Order cannot be cancelled — it is already being prepared');
+      }
 
       await tx.insert(order_status_history).values({
         order_id: id,

@@ -655,13 +655,15 @@ export function customerPage(): string {
       const phone = document.getElementById('lookupPhone').value.trim();
       if (!phone) return;
       const el = document.getElementById('lookupResults');
+      if (!urlToken) { el.innerHTML = '<p style="color:var(--ink-soft);text-align:center">Scan the QR code on your table to look up your orders.</p>'; return; }
       el.innerHTML = '<p style="color:var(--ink-soft);text-align:center">Searching…</p>';
       try {
-        const r = await fetch('/api/orders/lookup?phone=' + encodeURIComponent(phone));
+        const r = await fetch('/api/orders/lookup?phone=' + encodeURIComponent(phone) + '&tableToken=' + encodeURIComponent(urlToken));
         const orders = await r.json();
+        if (!r.ok) { el.innerHTML = '<p style="color:var(--ink-soft);text-align:center">' + esc(orders.error || 'Could not look up orders.') + '</p>'; return; }
         if (!orders.length) { el.innerHTML = '<p style="color:var(--ink-soft);text-align:center">No orders found for that number.</p>'; return; }
         el.innerHTML = orders.map(o => {
-          const date = new Date(o.createdAt).toLocaleDateString('en-PK', {day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'});
+          const date = new Date(o.createdAt).toLocaleDateString(undefined, {day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'});
           const badgeCls = {received:'badge-amber',preparing:'badge-blue',ready:'badge-green',served:'badge-muted',cancelled:'badge-red'}[o.status] || 'badge-muted';
           return '<div class="card" style="padding:12px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;gap:10px">' +
             '<div><div style="font-weight:800;font-size:1.05rem">Table ' + (o.tableNumber||'?') + ' · ' + CURRENCY_SYMBOL + ' ' + parseFloat(o.totalAmount||0).toFixed(0) + '</div>' +
@@ -738,7 +740,7 @@ export function customerPage(): string {
           method:'POST', headers:{'Content-Type':'application/json'},
           body: JSON.stringify(orderBody),
         });
-        if (!res.ok) { const e=await res.json(); toast(e.error||'Failed to place order', 'error'); return; }
+        if (!res.ok) { const e=await res.json(); toast((e.details && e.details[0] && e.details[0].message) || e.error || 'Failed to place order', 'error'); return; }
         const order = await res.json();
         showSuccess(order);
         cart = {}; custName = ''; custPhone = '';

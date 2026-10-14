@@ -48,6 +48,15 @@ if (!config.SESSION_SECRET || config.SESSION_SECRET.length < 32) {
 }
 
 const app = express();
+
+// Behind a reverse proxy every request otherwise appears to come from the proxy's
+// address, which breaks per-IP rate limits and the IPs written to the audit log.
+if (config.TRUST_PROXY) {
+  app.set(
+    'trust proxy',
+    /^\d+$/.test(config.TRUST_PROXY) ? parseInt(config.TRUST_PROXY, 10) : config.TRUST_PROXY === 'true' ? true : config.TRUST_PROXY,
+  );
+}
 const httpServer = createServer(app);
 const wss = new WebSocketServer({ noServer: true });
 wss.on('error', (err) => logger.error('WebSocketServer error', { err }));

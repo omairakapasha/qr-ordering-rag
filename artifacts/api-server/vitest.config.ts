@@ -5,6 +5,11 @@ export default defineConfig({
   test: {
     environment: 'node',
     globals: true,
+    // The app refuses to start without these, and config.ts runs on import.
+    env: {
+      DATABASE_URL: 'postgresql://test:test@localhost:5432/test',
+      SESSION_SECRET: 'test-session-secret-0123456789abcdef',
+    },
   },
   resolve: {
     alias: {

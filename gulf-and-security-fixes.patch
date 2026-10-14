@@ -1,0 +1,610 @@
+diff --git a/.env.example b/.env.example
+index db059a6..50988b7 100644
+--- a/.env.example
++++ b/.env.example
+@@ -32,6 +32,11 @@ PORT=5000
+ # If left as localhost, QR codes will only work on the server itself.
+ CORS_ORIGIN=http://localhost:5000
+ 
++# [OPTIONAL] Number of reverse proxies in front of the app. Set to 1 when you
++# host it behind a platform proxy (Railway, Fly, Render, nginx). Leave empty
++# when phones connect to the server directly.
++TRUST_PROXY=
++
+ # ── Branding ──────────────────────────────────────────────────
+ # Shown on the customer page header, receipts, and page titles.
+ BRAND_NAME=Your Restaurant Name
+diff --git a/README.md b/README.md
+index 4d0b3fa..8ec0bdf 100644
+--- a/README.md
++++ b/README.md
+@@ -95,7 +95,7 @@ flowchart LR
+ │       ├── admin.ts                # Staff, analytics, inventory, audit, CSV export
+ │       ├── aiChat.ts               # Proxy to the AI chat service
+ │       ├── push.ts                 # Push subscription registration
+-│       └── __tests__/              # Integration tests
++│       └── __tests__/              # Route tests (database mocked)
+ ├── lib/db/src/
+ │   ├── index.ts                    # Pool, drizzle instance, schema re-exports
+ │   └── schema/                     # 9 Drizzle table definitions
+@@ -155,6 +155,7 @@ Put environment variables in `.env` for Docker, or in `artifacts/api-server/.env
+ | `OLLAMA_BASE_URL` | No | Local fallback model server. Defaults to `localhost:11434`. |
+ | `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` | No | Turn on order-ready push notifications |
+ | `INTERNAL_API_SECRET` | No | Shared secret for the Express to AI service proxy |
++| `TRUST_PROXY` | No | Number of reverse proxies in front of the app, for example `1` on most hosting platforms. Leave empty when phones connect directly. |
+ 
+ ## Local development
+ 
+@@ -174,6 +175,8 @@ pnpm --filter @workspace/api-server run dev
+ cd packages/ai-chat && uvicorn main:app --port 8001
+ ```
+ 
++Run the tests with `pnpm --filter @workspace/api-server run test`. They mock the database, so no Postgres is needed.
++
+ ## Design notes
+ 
+ - Stock can't be oversold. When an item has finite stock, the order transaction decrements it under a `WHERE stock_quantity >= requested` guard, so two concurrent orders for the last portion can't both succeed.
+@@ -181,6 +184,9 @@ cd packages/ai-chat && uvicorn main:app --port 8001
+ - Deleting a table depends on its history. A table with no orders is removed from the database. One with orders is only deactivated, so the financial records stay intact.
+ - The kitchen WebSocket feed is authenticated during the HTTP upgrade, and unauthenticated upgrades are dropped.
+ - History is never rewritten. Menu items are soft-archived, order-line prices are copied at order time, and the audit log is never updated or deleted.
++- Customers can look up their own orders by phone number, but only with the QR token of the table they ordered at, and only for orders from the last 6 hours. Knowing a phone number alone reveals nothing.
++- A customer cancel only succeeds for the request that actually moves the order out of `received`, so two simultaneous cancels can't restore stock twice.
++- In Docker Compose the database and AI service are bound to `127.0.0.1`, so devices on the restaurant WiFi can't reach them. Only the app on port 5000 is exposed.
+ - Passwords are hashed with bcrypt. Accounts created before hashing was added are upgraded the first time their owner logs in, and a login attempt for an unknown username takes about as long as one for a real account.
+ - Sessions are stored in Postgres. A password reset or account deactivation cuts off access immediately, and restarting the server doesn't log anyone out.
+ 
+diff --git a/artifacts/api-server/src/config.ts b/artifacts/api-server/src/config.ts
+index 3459ff2..3dc47c5 100644
+--- a/artifacts/api-server/src/config.ts
++++ b/artifacts/api-server/src/config.ts
+@@ -30,6 +30,9 @@ export default {
+   NODE_ENV: process.env.NODE_ENV || 'development',
+   PORT: parseInt(process.env.PORT || '5000'),
+   HOST: process.env.SERVER_HOST || '0.0.0.0',
++  // Number of reverse proxies in front of the app (e.g. 1 on most hosting platforms).
++  // Leave empty when the app is reached directly.
++  TRUST_PROXY: process.env.TRUST_PROXY || '',
+ 
+   // Database
+   DATABASE_URL: process.env.DATABASE_URL!,
+diff --git a/artifacts/api-server/src/index.ts b/artifacts/api-server/src/index.ts
+index a75de0f..5fa7393 100644
+--- a/artifacts/api-server/src/index.ts
++++ b/artifacts/api-server/src/index.ts
+@@ -48,6 +48,15 @@ if (!config.SESSION_SECRET || config.SESSION_SECRET.length < 32) {
+ }
+ 
+ const app = express();
++
++// Behind a reverse proxy every request otherwise appears to come from the proxy's
++// address, which breaks per-IP rate limits and the IPs written to the audit log.
++if (config.TRUST_PROXY) {
++  app.set(
++    'trust proxy',
++    /^\d+$/.test(config.TRUST_PROXY) ? parseInt(config.TRUST_PROXY, 10) : config.TRUST_PROXY === 'true' ? true : config.TRUST_PROXY,
++  );
++}
+ const httpServer = createServer(app);
+ const wss = new WebSocketServer({ noServer: true });
+ wss.on('error', (err) => logger.error('WebSocketServer error', { err }));
+diff --git a/artifacts/api-server/src/lib/__tests__/password.test.ts b/artifacts/api-server/src/lib/__tests__/password.test.ts
+new file mode 100644
+index 0000000..4907423
+--- /dev/null
++++ b/artifacts/api-server/src/lib/__tests__/password.test.ts
+@@ -0,0 +1,26 @@
++import { describe, it, expect } from 'vitest';
++import { hashPassword, verifyPassword, DUMMY_HASH } from '../password';
++
++describe('password helpers', () => {
++  it('stores a bcrypt hash, never the plain password', async () => {
++    const hash = await hashPassword('correct-horse');
++    expect(hash).not.toContain('correct-horse');
++    expect(hash).toMatch(/^\$2[aby]\$/);
++  });
++
++  it('accepts the right password and rejects a wrong one', async () => {
++    const hash = await hashPassword('correct-horse');
++    expect(await verifyPassword('correct-horse', hash)).toEqual({ ok: true, needsRehash: false });
++    expect(await verifyPassword('wrong', hash)).toEqual({ ok: false, needsRehash: false });
++  });
++
++  it('accepts a legacy plain-text row once and flags it for upgrade', async () => {
++    expect(await verifyPassword('admin123', 'admin123')).toEqual({ ok: true, needsRehash: true });
++    expect(await verifyPassword('admin124', 'admin123')).toEqual({ ok: false, needsRehash: false });
++    expect(await verifyPassword('x', 'admin123')).toEqual({ ok: false, needsRehash: false });
++  });
++
++  it('never matches the dummy hash used for unknown usernames', async () => {
++    expect((await verifyPassword('anything', DUMMY_HASH)).ok).toBe(false);
++  });
++});
+diff --git a/artifacts/api-server/src/lib/__tests__/phone.test.ts b/artifacts/api-server/src/lib/__tests__/phone.test.ts
+new file mode 100644
+index 0000000..98d5a17
+--- /dev/null
++++ b/artifacts/api-server/src/lib/__tests__/phone.test.ts
+@@ -0,0 +1,29 @@
++import { describe, it, expect } from 'vitest';
++import { normalizePhone, isValidPhone, phoneSchema } from '../phone';
++
++describe('normalizePhone', () => {
++  it('strips spaces, dashes, dots and brackets', () => {
++    expect(normalizePhone('+974 5512-3456')).toBe('+97455123456');
++    expect(normalizePhone('(050) 123.4567')).toBe('0501234567');
++  });
++});
++
++describe('isValidPhone', () => {
++  it.each(['55123456', '+97455123456', '0501234567', '03001234567', '1234567'])('accepts %s', (p) => {
++    expect(isValidPhone(p)).toBe(true);
++  });
++  it.each(['', '+', '123456', '1234567890123456', '55123x56', '++97455123456'])('rejects "%s"', (p) => {
++    expect(isValidPhone(p)).toBe(false);
++  });
++});
++
++describe('phoneSchema', () => {
++  it('returns the normalized number', () => {
++    expect(phoneSchema.parse('+974 5512 3456')).toBe('+97455123456');
++  });
++  it('rejects garbage with a readable message', () => {
++    const r = phoneSchema.safeParse('hello');
++    expect(r.success).toBe(false);
++    if (!r.success) expect(r.error.issues[0].message).toMatch(/valid phone number/i);
++  });
++});
+diff --git a/artifacts/api-server/src/lib/phone.ts b/artifacts/api-server/src/lib/phone.ts
+new file mode 100644
+index 0000000..fd9cf46
+--- /dev/null
++++ b/artifacts/api-server/src/lib/phone.ts
+@@ -0,0 +1,20 @@
++import { z } from 'zod';
++
++/** Strips spaces, dashes, dots and brackets so "+974 5512-3456" and "+97455123456" compare equal. */
++export function normalizePhone(raw: string): string {
++  return raw.replace(/[\s\-().]/g, '');
++}
++
++// International numbers run to at most 15 digits (E.164), with an optional
++// leading "+". The lower bound of 7 covers the shortest local numbers in use.
++const PHONE_RE = /^\+?\d{7,15}$/;
++
++export function isValidPhone(normalized: string): boolean {
++  return PHONE_RE.test(normalized);
++}
++
++export const phoneSchema = z
++  .string()
++  .max(30, 'Enter a valid phone number')
++  .transform(normalizePhone)
++  .pipe(z.string().regex(PHONE_RE, 'Enter a valid phone number, for example +974 5512 3456'));
+diff --git a/artifacts/api-server/src/pages/customer.ts b/artifacts/api-server/src/pages/customer.ts
+index 3647b5d..92a5b67 100644
+--- a/artifacts/api-server/src/pages/customer.ts
++++ b/artifacts/api-server/src/pages/customer.ts
+@@ -655,13 +655,15 @@ export function customerPage(): string {
+       const phone = document.getElementById('lookupPhone').value.trim();
+       if (!phone) return;
+       const el = document.getElementById('lookupResults');
++      if (!urlToken) { el.innerHTML = '<p style="color:var(--ink-soft);text-align:center">Scan the QR code on your table to look up your orders.</p>'; return; }
+       el.innerHTML = '<p style="color:var(--ink-soft);text-align:center">Searching…</p>';
+       try {
+-        const r = await fetch('/api/orders/lookup?phone=' + encodeURIComponent(phone));
++        const r = await fetch('/api/orders/lookup?phone=' + encodeURIComponent(phone) + '&tableToken=' + encodeURIComponent(urlToken));
+         const orders = await r.json();
++        if (!r.ok) { el.innerHTML = '<p style="color:var(--ink-soft);text-align:center">' + esc(orders.error || 'Could not look up orders.') + '</p>'; return; }
+         if (!orders.length) { el.innerHTML = '<p style="color:var(--ink-soft);text-align:center">No orders found for that number.</p>'; return; }
+         el.innerHTML = orders.map(o => {
+-          const date = new Date(o.createdAt).toLocaleDateString('en-PK', {day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'});
++          const date = new Date(o.createdAt).toLocaleDateString(undefined, {day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'});
+           const badgeCls = {received:'badge-amber',preparing:'badge-blue',ready:'badge-green',served:'badge-muted',cancelled:'badge-red'}[o.status] || 'badge-muted';
+           return '<div class="card" style="padding:12px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;gap:10px">' +
+             '<div><div style="font-weight:800;font-size:1.05rem">Table ' + (o.tableNumber||'?') + ' · ' + CURRENCY_SYMBOL + ' ' + parseFloat(o.totalAmount||0).toFixed(0) + '</div>' +
+@@ -738,7 +740,7 @@ export function customerPage(): string {
+           method:'POST', headers:{'Content-Type':'application/json'},
+           body: JSON.stringify(orderBody),
+         });
+-        if (!res.ok) { const e=await res.json(); toast(e.error||'Failed to place order', 'error'); return; }
++        if (!res.ok) { const e=await res.json(); toast((e.details && e.details[0] && e.details[0].message) || e.error || 'Failed to place order', 'error'); return; }
+         const order = await res.json();
+         showSuccess(order);
+         cart = {}; custName = ''; custPhone = '';
+diff --git a/artifacts/api-server/src/pages/receipt.ts b/artifacts/api-server/src/pages/receipt.ts
+index 97d1faf..04f65db 100644
+--- a/artifacts/api-server/src/pages/receipt.ts
++++ b/artifacts/api-server/src/pages/receipt.ts
+@@ -100,8 +100,8 @@ export function receiptPage(orderId: string): string {
+         const order = await r.json();
+ 
+         const date = new Date(order.createdAt);
+-        const dateStr = date.toLocaleDateString('en-PK', { day:'2-digit', month:'short', year:'numeric' });
+-        const timeStr = date.toLocaleTimeString('en-PK', { hour:'2-digit', minute:'2-digit' });
++        const dateStr = date.toLocaleDateString(undefined, { day:'2-digit', month:'short', year:'numeric' });
++        const timeStr = date.toLocaleTimeString(undefined, { hour:'2-digit', minute:'2-digit' });
+ 
+         let itemRows = '';
+         let subtotal = 0;
+diff --git a/artifacts/api-server/src/routes/__tests__/orders.auth.test.ts b/artifacts/api-server/src/routes/__tests__/orders.test.ts
+similarity index 52%
+rename from artifacts/api-server/src/routes/__tests__/orders.auth.test.ts
+rename to artifacts/api-server/src/routes/__tests__/orders.test.ts
+index 073df7f..4db16f0 100644
+--- a/artifacts/api-server/src/routes/__tests__/orders.auth.test.ts
++++ b/artifacts/api-server/src/routes/__tests__/orders.test.ts
+@@ -1,5 +1,11 @@
+ /**
+- * Test suite for the table-token-auth security fix (PLAN.md #0).
++ * Route tests for /api/orders. The database is mocked (see makeChain below), so
++ * these check the handler logic and the queries it builds, not Postgres itself.
++ *
++ * Suites: table-token auth, input validation, the stock guard, customer cancel
++ * (including the concurrent-cancel race) and the phone/QR-token order lookup.
++ *
++ * The first suite covers the table-token-auth security fix (PLAN.md #0).
+  *
+  * Exercises the auth/authz logic on POST /api/orders:
+  *   - Unauthenticated callers MUST supply a valid QR `tableToken`.
+@@ -253,3 +259,183 @@ describe('buildValidOrderBody helper', () => {
+     expect(body.items[0]).toMatchObject({ menuItemId: 1, quantity: 2 });
+   });
+ });
++
++
++// ─────────────────────────────────────────────────────────────────────────────
++// Helpers shared by the suites below
++// ─────────────────────────────────────────────────────────────────────────────
++
++// The order and lookup limiters key on the table token, so every test uses its
++// own token to stay clear of the per-minute limits.
++let tokenCounter = 0;
++const freshToken = () => `test-token-${++tokenCounter}`;
++const uuid = () => crypto.randomUUID();
++
++function tokenOrder(overrides: Record<string, any> = {}) {
++  return buildValidOrderBody({ tableToken: freshToken(), tableNumber: undefined, ...overrides });
++}
++
++describe('POST /api/orders — customer details validation', () => {
++  let app: express.Express;
++  beforeEach(() => {
++    resultQueue.length = 0;
++    whereCalls.length = 0;
++    vi.clearAllMocks();
++    app = makeApp();
++  });
++
++  it.each([
++    ['Qatar, local', '5512 3456'],
++    ['Qatar, international', '+974 5512 3456'],
++    ['UAE, local', '050 123 4567'],
++    ['Saudi Arabia, local', '0501234567'],
++    ['Pakistan, local', '0300-1234567'],
++  ])('accepts a %s number (%s)', async (_label, phone) => {
++    queueHappyPathTail();
++    const res = await request(app).post('/api/orders').send(tokenOrder({ customerPhone: phone }));
++    expect(res.status).toBe(201);
++  });
++
++  it.each(['Ali', 'Omar', 'Al'])('accepts the short name "%s"', async (name) => {
++    queueHappyPathTail();
++    const res = await request(app).post('/api/orders').send(tokenOrder({ customerName: name }));
++    expect(res.status).toBe(201);
++  });
++
++  it.each(['abc', '123', '+', '1234567890123456', '55 12 34 5x'])('rejects the phone "%s"', async (phone) => {
++    const res = await request(app).post('/api/orders').send(tokenOrder({ customerPhone: phone }));
++    expect(res.status).toBe(422);
++    expect(res.body.details[0].field).toBe('customerPhone');
++    expect(res.body.details[0].message).toMatch(/phone/i);
++  });
++
++  it.each(['', ' ', 'A'])('rejects the name "%s"', async (name) => {
++    const res = await request(app).post('/api/orders').send(tokenOrder({ customerName: name }));
++    expect(res.status).toBe(422);
++    expect(res.body.details[0].field).toBe('customerName');
++  });
++});
++
++describe('POST /api/orders — stock guard', () => {
++  let app: express.Express;
++  const LIMITED_ROW = { ...MENU_ROW, stock_quantity: 5 };
++
++  beforeEach(() => {
++    resultQueue.length = 0;
++    whereCalls.length = 0;
++    vi.clearAllMocks();
++    app = makeApp();
++  });
++
++  it('rejects an order for more than the remaining stock before touching the database', async () => {
++    resultQueue.push([TABLE_ROW]);
++    resultQueue.push([{ ...LIMITED_ROW, stock_quantity: 1 }]);
++    const res = await request(app).post('/api/orders').send(tokenOrder()); // wants 2, only 1 left
++    expect(res.status).toBe(400);
++    expect(res.body.error).toMatch(/insufficient stock/i);
++  });
++
++  it('fails the order when the guarded stock update matches no row (another order took the last items)', async () => {
++    resultQueue.push([TABLE_ROW]);
++    resultQueue.push([LIMITED_ROW]);                 // pre-check passes
++    resultQueue.push({}, {}, { rowCount: 0 });       // insert order, insert items, guarded UPDATE finds nothing
++    const res = await request(app).post('/api/orders').send(tokenOrder());
++    expect(res.status).toBe(400);
++    expect(res.body.error).toMatch(/ran out of stock/i);
++  });
++
++  it('places the order when the guarded stock update succeeds', async () => {
++    resultQueue.push([TABLE_ROW]);
++    resultQueue.push([LIMITED_ROW]);
++    resultQueue.push({}, {}, { rowCount: 1 }, {});   // ..., guarded UPDATE succeeds, mark table occupied
++    const res = await request(app).post('/api/orders').send(tokenOrder());
++    expect(res.status).toBe(201);
++  });
++});
++
++describe('POST /api/orders/:id/cancel', () => {
++  let app: express.Express;
++  const orderRow = (overrides: Record<string, any> = {}) => ({
++    id: 'x', status: 'received', created_at: new Date(), table_id: 1, customer_name: 'Ali', ...overrides,
++  });
++
++  beforeEach(() => {
++    resultQueue.length = 0;
++    whereCalls.length = 0;
++    vi.clearAllMocks();
++    app = makeApp();
++  });
++
++  it('cancels a fresh order and restores its stock', async () => {
++    resultQueue.push([orderRow()]);                      // order lookup
++    resultQueue.push([{ menuItemId: 1, quantity: 2 }]);  // items to restore
++    resultQueue.push([{ id: 'x' }], {}, {});             // UPDATE ... RETURNING, history insert, stock restore
++    resultQueue.push([], {});                            // other active orders at the table, table -> available
++    const res = await request(app).post(`/api/orders/${uuid()}/cancel`);
++    expect(res.status).toBe(200);
++    expect(res.body.message).toBe('Order cancelled');
++  });
++
++  it('refuses a second, concurrent cancel and does not restore stock again', async () => {
++    resultQueue.push([orderRow()]);                      // both requests saw status = received
++    resultQueue.push([{ menuItemId: 1, quantity: 2 }]);
++    resultQueue.push([]);                                // the guarded UPDATE matches no row: someone else got there first
++    // Sentinels for the history insert and stock restore. If the handler carried on
++    // past the failed UPDATE it would consume them.
++    resultQueue.push({ sentinel: 1 }, { sentinel: 2 });
++    const res = await request(app).post(`/api/orders/${uuid()}/cancel`);
++    expect(res.status).toBe(409);
++    expect(resultQueue).toHaveLength(2);
++  });
++
++  it('refuses to cancel once the kitchen has started the order', async () => {
++    resultQueue.push([orderRow({ status: 'preparing' })]);
++    const res = await request(app).post(`/api/orders/${uuid()}/cancel`);
++    expect(res.status).toBe(409);
++  });
++
++  it('refuses to cancel after the 2-minute window', async () => {
++    resultQueue.push([orderRow({ created_at: new Date(Date.now() - 3 * 60 * 1000) })]);
++    const res = await request(app).post(`/api/orders/${uuid()}/cancel`);
++    expect(res.status).toBe(409);
++  });
++});
++
++describe('GET /api/orders/lookup', () => {
++  let app: express.Express;
++  beforeEach(() => {
++    resultQueue.length = 0;
++    whereCalls.length = 0;
++    vi.clearAllMocks();
++    app = makeApp();
++  });
++
++  it('requires a table token', async () => {
++    const res = await request(app).get('/api/orders/lookup').query({ phone: '+974 5512 3456' });
++    expect(res.status).toBe(401);
++  });
++
++  it('rejects an unknown table token', async () => {
++    resultQueue.push([]); // no such table
++    const res = await request(app).get('/api/orders/lookup').query({ phone: '55123456', tableToken: freshToken() });
++    expect(res.status).toBe(401);
++  });
++
++  it('rejects an invalid phone number', async () => {
++    const res = await request(app).get('/api/orders/lookup').query({ phone: 'abc', tableToken: freshToken() });
++    expect(res.status).toBe(400);
++  });
++
++  it('only searches this table, for the normalized phone number', async () => {
++    resultQueue.push([{ id: 7 }]);                                            // table lookup
++    resultQueue.push([{ id: 'o1', status: 'received', totalAmount: '38' }]);  // matching orders
++    const res = await request(app).get('/api/orders/lookup').query({ phone: '+974 5512-3456', tableToken: freshToken() });
++    expect(res.status).toBe(200);
++    expect(res.body).toHaveLength(1);
++
++    const lookup = whereCalls.map(w => JSON.stringify(w)).find(w => w.includes('orders.customer_phone'))!;
++    expect(lookup).toContain('"val":"+97455123456"');                  // spaces and dashes stripped
++    expect(lookup).toContain('"col":"orders.table_id","val":7');       // scoped to the token's table
++    expect(lookup).toContain('"op":"gte"');                            // limited to recent orders
++  });
++});
+diff --git a/artifacts/api-server/src/routes/auth.ts b/artifacts/api-server/src/routes/auth.ts
+index 014d182..8f1c3f0 100644
+--- a/artifacts/api-server/src/routes/auth.ts
++++ b/artifacts/api-server/src/routes/auth.ts
+@@ -30,9 +30,9 @@ router.post(
+   loginLimiter,
+   asyncHandler(async (req: Request, res: Response) => {
+     const { username, password } = loginSchema.parse(req.body);
+-    const clientIp = (req.headers['x-forwarded-for'] as string)?.split(',')[0].trim() ||
+-      req.socket.remoteAddress ||
+-      'unknown';
++    // req.ip honors the TRUST_PROXY setting; reading X-Forwarded-For directly would
++    // let any client write whatever address it likes into the audit log.
++    const clientIp = req.ip ?? req.socket.remoteAddress ?? 'unknown';
+ 
+     const [user] = await db
+       .select()
+diff --git a/artifacts/api-server/src/routes/orders.ts b/artifacts/api-server/src/routes/orders.ts
+index df19d43..e1a8323 100644
+--- a/artifacts/api-server/src/routes/orders.ts
++++ b/artifacts/api-server/src/routes/orders.ts
+@@ -10,6 +10,7 @@ import { asyncHandler, AppError } from '../middlewares/errorHandler';
+ import { broadcast } from '../lib/websocket';
+ import { sendOrderReadyNotification } from '../lib/push.js';
+ import { writeAuditLog } from '../lib/auditLog.js';
++import { phoneSchema, normalizePhone, isValidPhone } from '../lib/phone.js';
+ import { v4 as uuidv4 } from 'uuid';
+ 
+ // Keyed by table token so each table gets its own independent limit.
+@@ -53,6 +54,21 @@ const statusPollLimiter = rateLimit({
+   message: { error: 'Too many status requests.' },
+ });
+ 
++// Order lookup is keyed by the table's QR token: a lookup needs a real token, so
++// the limit follows the table and not the restaurant's shared WiFi address.
++const lookupLimiter = rateLimit({
++  windowMs: 60 * 1000,
++  max: 20,
++  keyGenerator: (req) => `lookup:${String(req.query.tableToken ?? req.ip ?? 'unknown')}`,
++  validate: { keyGeneratorIpFallback: false },
++  standardHeaders: true,
++  legacyHeaders: false,
++  message: { error: 'Too many lookups. Please wait a minute.' },
++});
++
++// Lookups only cover orders from the last few hours, which is a dine-in visit.
++const LOOKUP_WINDOW_MS = 6 * 60 * 60 * 1000;
++
+ const router: Router = Router();
+ 
+ // Order ids are UUIDs. A non-UUID path param (e.g. /api/orders/garbage/status)
+@@ -127,8 +143,8 @@ async function tableHasOtherActiveOrders(tableId: number, excludeOrderId: string
+ const createOrderSchema = z.object({
+   tableToken: z.string().min(1).optional(),
+   tableNumber: z.number().int().positive().optional(),
+-  customerName: z.string().min(5, 'Name required').max(20),
+-  customerPhone: z.string().min(11, 'Phone required').max(11),
++  customerName: z.string().trim().min(2, 'Please enter your name').max(50, 'Name is too long'),
++  customerPhone: phoneSchema,
+   items: z.array(
+     z.object({
+       menuItemId: z.number().int().positive(),
+@@ -184,16 +200,27 @@ async function getActiveQueueWithItems() {
+ }
+ 
+ /**
+- * GET /api/orders/lookup?phone=  — find recent orders by customer phone (public)
+- * Must be defined before /:id to avoid route collision.
++ * GET /api/orders/lookup?phone=&tableToken=  — find this visit's orders by phone number.
++ * Needs the table's QR token as well as the phone number, so knowing a phone
++ * number alone doesn't reveal anyone's orders. Must be defined before /:id.
+  */
+ router.get(
+   '/lookup',
+-  statusPollLimiter,
++  lookupLimiter,
+   asyncHandler(async (req: Request, res: Response) => {
+-    const phone = String(req.query.phone ?? '').trim();
+-    if (!phone || phone.length < 7) throw new AppError(400, 'Valid phone number required');
++    const tableToken = String(req.query.tableToken ?? '');
++    const phone = normalizePhone(String(req.query.phone ?? ''));
++    if (!tableToken) throw new AppError(401, 'Table token required');
++    if (!isValidPhone(phone)) throw new AppError(400, 'Valid phone number required');
++
++    const [table] = await db
++      .select({ id: tables.id })
++      .from(tables)
++      .where(and(eq(tables.qr_token, tableToken), eq(tables.active, true)))
++      .limit(1);
++    if (!table) throw new AppError(401, 'Invalid table');
+ 
++    const since = new Date(Date.now() - LOOKUP_WINDOW_MS);
+     const recent = await db
+       .select({
+         id: orders.id,
+@@ -204,7 +231,11 @@ router.get(
+       })
+       .from(orders)
+       .leftJoin(tables, eq(orders.table_id, tables.id))
+-      .where(eq(orders.customer_phone, phone))
++      .where(and(
++        eq(orders.customer_phone, phone),
++        eq(orders.table_id, table.id),
++        gte(orders.created_at, since),
++      ))
+       .orderBy(desc(orders.created_at))
+       .limit(10);
+ 
+@@ -480,12 +511,20 @@ router.post(
+       .where(eq(order_items.order_id, id));
+ 
+     await db.transaction(async (tx) => {
+-      await tx.update(orders).set({
++      // The status check above ran outside this transaction, so repeat it in the
++      // UPDATE itself. Only the request that actually moves the order out of
++      // 'received' may restore stock; a concurrent cancel (or the kitchen starting
++      // the order) matches no row and is rejected, so stock can't be restored twice.
++      const cancelled = await tx.update(orders).set({
+         status: 'cancelled',
+         updated_at: new Date(),
+         cancelled_at: new Date(),
+         cancellation_reason: 'Customer cancelled',
+-      }).where(eq(orders.id, id));
++      }).where(and(eq(orders.id, id), eq(orders.status, 'received')))
++        .returning({ id: orders.id });
++      if (cancelled.length === 0) {
++        throw new AppError(409, 'Order cannot be cancelled — it is already being prepared');
++      }
+ 
+       await tx.insert(order_status_history).values({
+         order_id: id,
+diff --git a/artifacts/api-server/vitest.config.ts b/artifacts/api-server/vitest.config.ts
+index 177c266..7bcb30c 100644
+--- a/artifacts/api-server/vitest.config.ts
++++ b/artifacts/api-server/vitest.config.ts
+@@ -5,6 +5,11 @@ export default defineConfig({
+   test: {
+     environment: 'node',
+     globals: true,
++    // The app refuses to start without these, and config.ts runs on import.
++    env: {
++      DATABASE_URL: 'postgresql://test:test@localhost:5432/test',
++      SESSION_SECRET: 'test-session-secret-0123456789abcdef',
++    },
+   },
+   resolve: {
+     alias: {
+diff --git a/docker-compose.yml b/docker-compose.yml
+index c189883..0530b8b 100644
+--- a/docker-compose.yml
++++ b/docker-compose.yml
+@@ -9,7 +9,7 @@ services:
+     volumes:
+       - pgdata:/var/lib/postgresql/data
+     ports:
+-      - "5432:5432"
++      - "127.0.0.1:5432:5432"
+     healthcheck:
+       test: ["CMD-SHELL", "pg_isready -U postgres -d restaurant"]
+       interval: 5s
+@@ -29,6 +29,7 @@ services:
+       NODE_ENV: production
+       PORT: 5000
+       CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:5000}
++      TRUST_PROXY: ${TRUST_PROXY:-}
+       BRAND_NAME: ${BRAND_NAME:-The Corner Table}
+       BRAND_TAGLINE: ${BRAND_TAGLINE:-Scan · Order · Enjoy}
+       CURRENCY_SYMBOL: ${CURRENCY_SYMBOL:-QAR}
+@@ -57,7 +58,7 @@ services:
+       dockerfile: Dockerfile
+     restart: unless-stopped
+     ports:
+-      - "8001:8001"
++      - "127.0.0.1:8001:8001"
+     environment:
+       DATABASE_URL: postgresql://postgres:postgres@db:5432/restaurant
+       GEMINI_API_KEY: ${GEMINI_API_KEY:-}

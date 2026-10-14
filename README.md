@@ -95,7 +95,7 @@ flowchart LR
 │       ├── admin.ts                # Staff, analytics, inventory, audit, CSV export
 │       ├── aiChat.ts               # Proxy to the AI chat service
 │       ├── push.ts                 # Push subscription registration
-│       └── __tests__/              # Integration tests
+│       └── __tests__/              # Route tests (database mocked)
 ├── lib/db/src/
 │   ├── index.ts                    # Pool, drizzle instance, schema re-exports
 │   └── schema/                     # 9 Drizzle table definitions
@@ -155,6 +155,7 @@ Put environment variables in `.env` for Docker, or in `artifacts/api-server/.env
 | `OLLAMA_BASE_URL` | No | Local fallback model server. Defaults to `localhost:11434`. |
 | `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` | No | Turn on order-ready push notifications |
 | `INTERNAL_API_SECRET` | No | Shared secret for the Express to AI service proxy |
+| `TRUST_PROXY` | No | Number of reverse proxies in front of the app, for example `1` on most hosting platforms. Leave empty when phones connect directly. |
 
 ## Local development
 
@@ -174,6 +175,8 @@ pnpm --filter @workspace/api-server run dev
 cd packages/ai-chat && uvicorn main:app --port 8001
 ```
 
+Run the tests with `pnpm --filter @workspace/api-server run test`. They mock the database, so no Postgres is needed.
+
 ## Design notes
 
 - Stock can't be oversold. When an item has finite stock, the order transaction decrements it under a `WHERE stock_quantity >= requested` guard, so two concurrent orders for the last portion can't both succeed.
@@ -181,6 +184,9 @@ cd packages/ai-chat && uvicorn main:app --port 8001
 - Deleting a table depends on its history. A table with no orders is removed from the database. One with orders is only deactivated, so the financial records stay intact.
 - The kitchen WebSocket feed is authenticated during the HTTP upgrade, and unauthenticated upgrades are dropped.
 - History is never rewritten. Menu items are soft-archived, order-line prices are copied at order time, and the audit log is never updated or deleted.
+- Customers can look up their own orders by phone number, but only with the QR token of the table they ordered at, and only for orders from the last 6 hours. Knowing a phone number alone reveals nothing.
+- A customer cancel only succeeds for the request that actually moves the order out of `received`, so two simultaneous cancels can't restore stock twice.
+- In Docker Compose the database and AI service are bound to `127.0.0.1`, so devices on the restaurant WiFi can't reach them. Only the app on port 5000 is exposed.
 - Passwords are hashed with bcrypt. Accounts created before hashing was added are upgraded the first time their owner logs in, and a login attempt for an unknown username takes about as long as one for a real account.
 - Sessions are stored in Postgres. A password reset or account deactivation cuts off access immediately, and restarting the server doesn't log anyone out.
 

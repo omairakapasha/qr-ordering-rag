@@ -30,9 +30,9 @@ router.post(
   loginLimiter,
   asyncHandler(async (req: Request, res: Response) => {
     const { username, password } = loginSchema.parse(req.body);
-    const clientIp = (req.headers['x-forwarded-for'] as string)?.split(',')[0].trim() ||
-      req.socket.remoteAddress ||
-      'unknown';
+    // req.ip honors the TRUST_PROXY setting; reading X-Forwarded-For directly would
+    // let any client write whatever address it likes into the audit log.
+    const clientIp = req.ip ?? req.socket.remoteAddress ?? 'unknown';
 
     const [user] = await db
       .select()

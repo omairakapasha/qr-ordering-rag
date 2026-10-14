@@ -30,6 +30,9 @@ export default {
   NODE_ENV: process.env.NODE_ENV || 'development',
   PORT: parseInt(process.env.PORT || '5000'),
   HOST: process.env.SERVER_HOST || '0.0.0.0',
+  // Number of reverse proxies in front of the app (e.g. 1 on most hosting platforms).
+  // Leave empty when the app is reached directly.
+  TRUST_PROXY: process.env.TRUST_PROXY || '',
 
   // Database
   DATABASE_URL: process.env.DATABASE_URL!,
