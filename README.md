@@ -9,7 +9,6 @@ A self-hosted ordering system for dine-in restaurants. A diner scans the QR code
 
 It runs on a single server with your own database and charges nothing per order. Payment is cash only.
 
-[![Watch the demo on LinkedIn](./assets/Kitchen%20Queue.png)]([https://lnkd.in/p/dbq3uRXT]))
 
 ## Contents
 
