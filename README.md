@@ -1,11 +1,11 @@
-# QR Ordering System with an AI Menu Assistant
+# QR Ordering System with a RAG Menu Assistant
 
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178C6.svg)](https://www.typescriptlang.org/)
 [![Node](https://img.shields.io/badge/node-%E2%89%A524-339933.svg)](https://nodejs.org/)
 [![PostgreSQL](https://img.shields.io/badge/postgres-15-4169E1.svg)](https://www.postgresql.org/)
 [![Docker](https://img.shields.io/badge/docker-ready-2496ED.svg)](https://www.docker.com/)
 
-A self-hosted ordering system for dine-in restaurants. A diner scans the QR code on their table, browses the menu, adds items to a cart and places the order. There is no app to install and no account to make. About a second later the order shows up on the kitchen screen over WebSocket. Staff run everything else (menu, tables, orders, inventory, people) from one admin dashboard.
+A self-hosted ordering system for dine-in restaurants. A diner scans the QR code on their table, browses the menu, adds items to a cart and places the order. There is no app to install and no account to make. About a second later the order shows up on the kitchen screen over WebSocket. Diners can also ask a chat assistant about the menu, which answers using retrieval over the restaurant's own menu data and runs on either Gemini or a local model. Staff run everything else (menu, tables, orders, inventory, people) from one admin dashboard.
 
 It runs on a single server with your own database and charges nothing per order. Payment is cash only.
 
@@ -20,6 +20,7 @@ It runs on a single server with your own database and charges nothing per order.
 - [Quickstart](#quickstart)
 - [Architecture](#architecture)
 - [Pages](#pages)
+- [AI menu assistant](#ai-menu-assistant)
 - [Configuration](#configuration)
 - [Local development](#local-development)
 - [Design notes](#design-notes)
@@ -115,6 +116,12 @@ flowchart LR
 | `/kitchen` | Kitchen | Ticket queue that updates over WebSocket, with status transitions |
 | `/waiter` | Floor staff | Read-only live view of orders |
 | `/admin` | Managers | Menu CRUD, tables (add, edit, delete), staff, inventory, analytics charts, audit log, CSV export |
+
+## AI menu assistant
+
+The assistant is a retrieval-augmented chatbot that answers diners' questions about the menu. It is a separate FastAPI service in `packages/ai-chat`, and the Express API proxies chat requests to it, authenticating with `INTERNAL_API_SECRET`. The service keeps conversation state for each chat session.
+
+Model routing is set by configuration. With `GEMINI_API_KEY` set, replies come from Gemini. Without it, the service uses a local model through Ollama, so the whole system can run without any external API. The assistant answers questions only. It doesn't add items to the cart or place orders. Chat requests are rate limited per chat session.
 
 ## Configuration
 
