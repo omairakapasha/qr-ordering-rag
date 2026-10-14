@@ -28,11 +28,13 @@ It runs on a single server with your own database and charges nothing per order.
 
 ```bash
 cp .env.example .env
-# Edit: SESSION_SECRET, DEFAULT_ADMIN_PASSWORD, DEFAULT_KITCHEN_PASSWORD
+# Edit: CORS_ORIGIN, SESSION_SECRET, DEFAULT_ADMIN_PASSWORD, DEFAULT_KITCHEN_PASSWORD
 docker compose up -d
 ```
 
-Open `http://localhost:5000` and sign in at `/admin` with the credentials you set. The first run seeds an admin, a kitchen and a waiter account, 20 tables with QR codes, and some sample menu items.
+Set `CORS_ORIGIN` to the address phones use to reach the server, for example `http://192.168.1.100:5000`. Every table's QR code is built from it, and with the default `localhost` the codes only open on the server itself.
+
+Open `http://localhost:5000` and sign in at `/admin` with the credentials you set. The first run seeds an admin, a kitchen and a waiter account, 20 tables with QR codes, and five placeholder menu items that stay hidden from diners until you edit and enable them.
 
 To set it up without Docker, follow [ONBOARDING.md](ONBOARDING.md).
 
@@ -67,7 +69,10 @@ flowchart LR
 │   │   ├── csv.ts                  # CSV export helper
 │   │   ├── logger.ts               # Pino logger
 │   │   ├── migrate.ts              # Drizzle migration runner
+│   │   ├── password.ts             # bcrypt hashing and checking
+│   │   ├── phone.ts                # Phone number cleanup and validation
 │   │   ├── push.ts                 # Web Push (VAPID) notifications
+│   │   ├── retention.ts            # Clears old customer names and phone numbers
 │   │   └── websocket.ts            # WebSocket manager and broadcast
 │   ├── middlewares/
 │   │   ├── csrfCheck.ts            # Origin / referer CSRF guard
@@ -129,7 +134,7 @@ With `GEMINI_API_KEY` set, requests go to Gemini first. The Gemini client has a 
 
 ### Conversation state and limits
 
-The service keeps the last 5 exchanges for each chat session in memory, drops sessions idle for an hour, and holds at most 500 sessions. A restart clears them. The Express API rate limits chat requests per chat session.
+The service keeps the last 5 exchanges for each chat session in memory, drops sessions idle for an hour, and holds at most 500 sessions. A restart clears them. The Express API rate limits chat requests per chat session and, as a backstop, per IP address.
 
 The assistant has no tools. It answers questions and doesn't add items to the cart or place orders.
 
@@ -144,9 +149,11 @@ Put environment variables in `.env` for Docker, or in `artifacts/api-server/.env
 | `DEFAULT_ADMIN_PASSWORD` | First run | Password for the seeded admin login |
 | `DEFAULT_KITCHEN_PASSWORD` | First run | Password for the seeded kitchen login |
 | `DEFAULT_WAITER_PASSWORD` | First run | Password for the seeded waiter login |
+| `CORS_ORIGIN` | Yes, for QR codes | Address customers' phones use to reach the app, such as `http://192.168.1.100:5000`. QR codes are built from it. Defaults to `http://localhost:5000`. |
 | `BRAND_NAME` | No | Restaurant name in headers and page titles |
 | `BRAND_TAGLINE` | No | Tagline on the customer page |
 | `CURRENCY_SYMBOL` | No | Currency label next to prices. Defaults to `QAR`. |
+| `CURRENCY_CODE` | No | Currency code used in chart labels and CSV exports. Defaults to `QAR`. |
 | `GEMINI_API_KEY` | No | Turns on the AI menu assistant through Gemini. Leave it unset to run the assistant entirely on a local Ollama model. |
 | `OLLAMA_BASE_URL` | No | Local fallback model server. Defaults to `localhost:11434`. |
 | `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` | No | Turn on order-ready push notifications |
@@ -204,7 +211,7 @@ A few things still need a connection:
 
 When a diner places an order, the app stores the name and phone number they entered on that order, in the `customer_name` and `customer_phone` columns of the `orders` table in your PostgreSQL database. The phone number is saved with spaces and dashes removed. The application doesn't encrypt either field, so protect the database volume and its backups as you would any customer data.
 
-Kitchen and waiter screens show them on the order ticket, and admins can see them and export them in the orders CSV. The diner's browser keeps only their cart. The app doesn't write names or phone numbers to its logs, but a reverse proxy in front of it may log request URLs, and the order lookup puts the phone number in the URL.
+Kitchen and waiter screens show them on the order ticket, and admins can see them and export them in the orders CSV. The diner's browser keeps only their cart. The app doesn't write names or phone numbers to its logs or its audit log, but a reverse proxy in front of it may log request URLs, and the order lookup puts the phone number in the URL.
 
 By default the name and phone number are cleared from orders older than 90 days, when the server starts and once a day after that. The orders, items and totals stay, so sales figures don't change. Set `PII_RETENTION_DAYS` to change the period, or to `0` to keep the details for good. The cleanup doesn't reach database backups taken before it ran.
 

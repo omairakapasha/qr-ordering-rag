@@ -30,6 +30,8 @@ BRAND_TAGLINE=Your short slogan
 CURRENCY_SYMBOL=QAR
 CURRENCY_CODE=QAR
 
+CORS_ORIGIN=http://192.168.1.100:5000
+
 DEFAULT_ADMIN_PASSWORD=pick-a-strong-password
 DEFAULT_KITCHEN_PASSWORD=pick-a-strong-password
 DEFAULT_WAITER_PASSWORD=pick-a-strong-password
@@ -39,6 +41,20 @@ INTERNAL_API_SECRET=type-any-long-random-text-here
 ```
 
 That's all you must change. Save the file.
+
+> **Set `CORS_ORIGIN` to your server's own address.** Every table's QR code contains this
+> address, so customers' phones must be able to reach it. `192.168.1.100` above is only an
+> example. Find the real one on the computer that runs the system, while it is connected to
+> the restaurant's network:
+>
+> - **Windows:** open Command Prompt, run `ipconfig`, and read the **IPv4 Address** line.
+> - **Mac:** open Terminal and run `ipconfig getifaddr en0`.
+> - **Linux:** run `hostname -I`.
+>
+> Write it as `http://` + that address + `:5000`. Do this **before** you download the QR
+> codes in Step 5, because a code made with the wrong address won't open on a phone. Also
+> ask whoever manages your router to give this computer a fixed address. If the address
+> changes after a restart, every printed QR code stops working.
 
 > **Tip:** the two "secret" lines can be any long random text — just don't leave them
 > blank. To generate one automatically, run **one** of these and paste the result:
@@ -62,7 +78,7 @@ docker compose up -d
 
 The first time, this takes a few minutes (it downloads and builds everything).
 After that it starts in seconds. The system sets up its own database automatically
-and creates 3 staff logins, 20 tables with QR codes, and sample menu items.
+and creates 3 staff logins, 20 tables with QR codes, and five placeholder menu items that stay hidden from customers until you edit them.
 
 Check it's running — open this in a browser:
 
@@ -83,7 +99,7 @@ You should see the menu page with your restaurant name on it.
 3. In the **Menu** tab:
    - Add your real dishes (name, price, category, description, photo).
    - Each item can include prep time, spice level, allergens, and a vegetarian flag — customers see all of this when they tap an item.
-   - Hide sample items by clicking **Archive** next to each one.
+   - Remove the placeholder items by clicking **Archive** next to each one.
 4. In the **Tables** tab:
    - Add your tables (set table number and seat capacity).
    - Click **⬇️ All QRs** to download all QR code images at once.
@@ -94,7 +110,7 @@ You should see the menu page with your restaurant name on it.
 
 ## Step 5 — Put QR codes on the tables
 
-Print each table's QR code and place it on the matching table.
+Print each table's QR code and place it on the matching table. If a code doesn't open on a phone, check the `CORS_ORIGIN` line from Step 2.
 When a customer scans it, the menu opens already set to that table.
 
 **You're done.** 🎉

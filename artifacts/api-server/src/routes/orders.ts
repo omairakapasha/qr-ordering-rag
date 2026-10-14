@@ -552,7 +552,6 @@ router.post(
     }
 
     writeAuditLog(undefined, 'order:cancelled_by_customer', 'order', id, {
-      customerName: order.customer_name,
       tableId: order.table_id,
       ageMs,
     }, req).catch(() => {});
