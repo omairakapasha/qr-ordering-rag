@@ -9,12 +9,6 @@ A self-hosted ordering system for dine-in restaurants. A diner scans the QR code
 
 It runs on a single server with your own database and charges nothing per order. Payment is cash only.
 
-## Demo
-
-<p align="center">
-  <video src="https://lnkd.in/p/dbq3uRXT" width="100%" controls autoplay loop></video>
-</p>
-
 ## Contents
 
 - [Quickstart](#quickstart)
